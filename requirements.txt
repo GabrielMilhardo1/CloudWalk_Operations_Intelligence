@@ -1,0 +1,24 @@
+# CloudWalk Operations Intelligence - Dependencies
+
+# Core Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Database
+# SQLite is built into Python
+
+# LLM Integration
+groq>=0.4.0
+python-dotenv>=1.0.0
+
+# Web Interface
+streamlit>=1.30.0
+
+# Visualization
+plotly>=5.18.0
+seaborn>=0.13.0
+matplotlib>=3.8.0
+
+# Jupyter (for EDA notebook)
+jupyter>=1.0.0
+ipykernel>=6.0.0
