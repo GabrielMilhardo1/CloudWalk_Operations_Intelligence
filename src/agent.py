@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 from src.database import Database
-from src.prompts import SYSTEM_PROMPT
+from src.prompts import SYSTEM_PROMPT, SUMMARY_PROMPT
 
 # Load environment variables
 load_dotenv()
@@ -79,22 +79,40 @@ class CloudWalkAgent:
             text: LLM response text
 
         Returns:
-            Extracted SQL query or None
+            Extracted SQL query or None (only the FIRST valid query)
         """
-        # Try to find SQL in code blocks
-        patterns = [
-            r"```sql\n(.*?)```",  # ```sql ... ```
-            r"```\n(.*?)```",      # ``` ... ```
-            r"SELECT.*?(?:;|$)",   # Direct SELECT statement
-        ]
+        # Try to find SQL in code blocks first
+        sql_block_pattern = r"```sql\s*(.*?)```"
+        match = re.search(sql_block_pattern, text, re.DOTALL | re.IGNORECASE)
 
-        for pattern in patterns:
-            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            sql = match.group(1).strip()
+        else:
+            # Try generic code block
+            generic_block_pattern = r"```\s*(SELECT.*?)```"
+            match = re.search(generic_block_pattern, text, re.DOTALL | re.IGNORECASE)
             if match:
-                sql = match.group(1) if "```" in pattern else match.group(0)
-                sql = sql.strip()
-                if sql.upper().startswith("SELECT"):
-                    return sql
+                sql = match.group(1).strip()
+            else:
+                # Try direct SELECT statement
+                select_pattern = r"(SELECT\s+.*?)(?:;|\n\n|```|$)"
+                match = re.search(select_pattern, text, re.DOTALL | re.IGNORECASE)
+                if match:
+                    sql = match.group(1).strip()
+                else:
+                    return None
+
+        # Clean the SQL - only keep the first statement
+        # Remove SQL comments that might contain other queries
+        sql = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
+
+        # Stop at first semicolon to avoid multiple statements
+        if ';' in sql:
+            sql = sql.split(';')[0].strip()
+
+        # Validate it starts with SELECT
+        if sql.upper().startswith("SELECT"):
+            return sql
 
         return None
 
@@ -119,6 +137,48 @@ class CloudWalkAgent:
             messages=messages,
             temperature=0.1,  # Low temperature for consistent SQL
             max_tokens=2000
+        )
+
+        return response.choices[0].message.content
+
+    def _analyze_results(self, question: str, sql: str, df) -> str:
+        """
+        Analyze query results and generate insights.
+
+        Args:
+            question: Original user question
+            sql: SQL query that was executed
+            df: DataFrame with query results
+
+        Returns:
+            Analysis text with insights
+        """
+        # Format results for analysis
+        if len(df) <= 10:
+            results_str = df.to_string(index=False)
+        else:
+            results_str = df.head(10).to_string(index=False) + f"\n... ({len(df)} total rows)"
+
+        analysis_prompt = f"""Original question: {question}
+
+SQL executed:
+{sql}
+
+Results:
+{results_str}
+
+{SUMMARY_PROMPT}
+
+Provide a clear, insightful analysis of these results. Focus on answering the original question and highlighting key findings."""
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": "You are an expert financial data analyst. Analyze the query results and provide clear insights."},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=500
         )
 
         return response.choices[0].message.content
@@ -172,8 +232,9 @@ class CloudWalkAgent:
                         else:
                             result["answer"] = str(value)
                     else:
-                        # Table result - include in response
-                        result["answer"] = llm_response
+                        # Table result - analyze the results
+                        analysis = self._analyze_results(question, sql, df)
+                        result["answer"] = analysis
 
                 except Exception as e:
                     result["error"] = f"SQL execution error: {str(e)}"
